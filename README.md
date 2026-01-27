@@ -36,6 +36,9 @@ To contribute to this project, submit a pull request with your proposed changes.
 
 ## Update History
 
+### 0.9.3
+- [https://github.com/MoonlyDays/TF2_EngineerPVE/pull/11] Fix continuous timer on multistage maps
+
 ### 0.9.2
 - [https://github.com/MoonlyDays/TF2_EngineerPVE/pull/9] Fixed replay bot getting assigned a team 
 - [https://github.com/MoonlyDays/TF2_EngineerPVE/pull/10] Round timer is now continuous on mullti-stage maps
