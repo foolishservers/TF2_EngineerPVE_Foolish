@@ -8,7 +8,7 @@
 #include <tf_econ_data>
 #include <dhooks>
 
-#define PLUGIN_VERSION       "0.9.2"
+#define PLUGIN_VERSION       "0.9.3"
 
 #define PVE_TEAM_HUMANS_NAME "blue"
 #define PVE_TEAM_BOTS_NAME   "red"
