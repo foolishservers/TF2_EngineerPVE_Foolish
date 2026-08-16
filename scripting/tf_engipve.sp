@@ -103,9 +103,6 @@ bool          g_bIsSteel              = false;
 bool          g_bSteelFirstCap        = false;
 bool          g_bForceBotSpawnActive  = false;
 float         g_vecForceBotSpawn[3];
-// Is this map cp_dustbowl?
-bool          g_bIsDustbowl           = false;
-int           g_iDustbowlStage        = 1;
 // When did the round start?
 float         g_flRoundStartTime      = 0.0;
 // Current round time if a multimap stage
@@ -215,7 +212,6 @@ public void OnMapStart()
     GetCurrentMap(mapname, sizeof(mapname));
     g_bIsHydro = StrEqual(mapname, "tc_hydro", false);
     g_bIsSteel = StrEqual(mapname, "cp_steel", false);
-    g_bIsDustbowl = StrEqual(mapname, "cp_dustbowl", false);
 
     // Disable boss spawn on map start
     ConVar hBossTime = FindConVar("tf_populator_active_boss_time");
@@ -841,28 +837,9 @@ void PVE_DisableCTFBLUFlag()
     }
 }
 
-bool IsAttackDefendMap()
-{
-    if (g_bIsHydro) return false; // Hydro is treated as a linear 5CP map by this plugin
-
-    // A/D maps have all their control points owned by RED (2) by default.
-    // Symmetrical 5CP maps have at least one neutral control point (0) by default (the mid point).
-    int ent = -1;
-    bool hasNeutralPoint = false;
-    while ((ent = FindEntityByClassname(ent, "team_control_point")) != -1)
-    {
-        if (GetEntProp(ent, Prop_Data, "m_iDefaultOwner") == 0)
-        {
-            hasNeutralPoint = true;
-            break;
-        }
-    }
-    return !hasNeutralPoint;
-}
-
 void PVE_SetupMapControlPoints()
 {
-    if (g_bIsSteel || IsAttackDefendMap())
+    if (g_bIsSteel)
     {
         return;
     }
@@ -1120,13 +1097,6 @@ public Action teamplay_setup_finished(Event event, const char[] name, bool dontB
     PVE_DisableCTFBLUFlag();
     CreateTimer(0.1, Timer_SetupMapControlPoints);
 
-    if (g_bIsDustbowl && g_iDustbowlStage >= 2)
-    {
-        g_bIsFakeSetupActive = true;
-        g_flFakeSetupEndTime = GetGameTime() + 90.0;
-        PrintCenterTextAll("Setup time: 90 seconds!");
-    }
-
     return Plugin_Continue;
 }
 
@@ -1191,7 +1161,7 @@ public Action teamplay_point_captured(Event event, const char[] name, bool dontB
     int team = event.GetInt("team");
     
     // Dynamically clear the requirement for the next point to forcefully unlock it
-    if (team == 3 && !g_bIsSteel && !IsAttackDefendMap()) // BLU
+    if (team == 3 && !g_bIsSteel) // BLU
     {
         int or = FindEntityByClassname(-1, "tf_objective_resource");
         if (or != -1)
@@ -1293,29 +1263,6 @@ public Action teamplay_round_start(Event event, const char[] name, bool dontBroa
     if (FullReset > 0) {
         g_bIsMultiStageMap = false;
         g_flCurrentMapTime = 0.0;
-        g_iDustbowlStage = 1;
-    }
-    else
-    {
-        if (g_bIsDustbowl)
-        {
-            g_iDustbowlStage++;
-            
-            // Bypass native setup time on stages 2 and 3 so fake setup can start immediately and bots can move
-            if (g_iDustbowlStage >= 2)
-            {
-                int timer = -1;
-                while ((timer = FindEntityByClassname(timer, "team_round_timer")) != -1)
-                {
-                    if (GetEntProp(timer, Prop_Send, "m_bIsSetupTimer"))
-                    {
-                        SetEntProp(timer, Prop_Send, "m_nSetupTimeLength", 1);
-                        SetVariantInt(1);
-                        AcceptEntityInput(timer, "SetTime");
-                    }
-                }
-            }
-        }
     }
     
     g_flRoundStartTime = GetGameTime();
@@ -1513,7 +1460,7 @@ public Action OnCaptureAreaTouch(int entity, int other)
         return Plugin_Continue;
     }
 
-    if ((g_bIsHydro || g_bIsDustbowl) && g_bIsFakeSetupActive)
+    if (g_bIsHydro && g_bIsFakeSetupActive)
     {
         // Block all captures during fake setup time
         return Plugin_Handled;
