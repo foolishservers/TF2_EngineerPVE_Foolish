@@ -65,13 +65,11 @@ ArrayList     g_hMeleeWeapons;
 //-----------------------------------------------------//
 // ConVar Definitions
 //-----------------------------------------------------//
-ConVar        tf_bot_quota;
 ConVar        tf_gamemode_cp;
 ConVar        sm_engipve_bot_sapper_insta_remove;
 ConVar        sm_engipve_respawn_bots_on_round_end;
 ConVar        sm_engipve_allow_respawnroom_build;
 ConVar        sm_engipve_clear_gibs;
-ConVar        sm_engipve_spy_capblock_time;
 
 //-----------------------------------------------------//
 // SDK Calls and Detours
@@ -97,10 +95,19 @@ int           g_eTeamRoundTimer;
 bool          g_bIsRoundEnd           = false;
 // Are we currently in active round period?
 bool          g_bIsRoundActive        = false;
+bool          g_bIsFakeSetupActive    = false;
+float         g_flFakeSetupEndTime    = 0.0;
+bool          g_bIsHydro              = false;
+// Is this map cp_steel?
+bool          g_bIsSteel              = false;
+bool          g_bSteelFirstCap        = false;
+bool          g_bForceBotSpawnActive  = false;
+float         g_vecForceBotSpawn[3];
+// Is this map cp_dustbowl?
+bool          g_bIsDustbowl           = false;
+int           g_iDustbowlStage        = 1;
 // When did the round start?
 float         g_flRoundStartTime      = 0.0;
-// Is spy capblocking feature enabled right now?
-bool          g_bSpyCapBlocking       = false;
 // Current round time if a multimap stage
 float         g_flCurrentMapTime      = 0.0;
 // Is this map a multistage map
@@ -133,17 +140,16 @@ public OnPluginStart()
     //-----------------------------------------------------//
     CreateConVar("engipve_version", PLUGIN_VERSION, "[TF2] Engineer PVE Version", FCVAR_DONTRECORD);
     sm_engipve_allow_respawnroom_build   = CreateConVar("sm_engipve_allow_respawnroom_build", "1", "Can humans build in respawn rooms?");
-    sm_engipve_bot_sapper_insta_remove   = CreateConVar("sm_engipve_bot_sapper_insta_remove", "1", "Bots remove sappers with just one hit");
+    sm_engipve_bot_sapper_insta_remove   = CreateConVar("sm_engipve_bot_sapper_insta_remove", "1", "Immediately destroys sappers placed by spy bots.");
     sm_engipve_respawn_bots_on_round_end = CreateConVar("sm_engipve_respawn_bots_on_round_end", "0", "Should we instantly respawn bots on round end? (Engineer Massacre)");
     sm_engipve_clear_gibs                = CreateConVar("sm_engipve_clear_gibs", "1", "Should we clean up gibs to save up on edicts?");
-    sm_engipve_spy_capblock_time         = CreateConVar("sm_engipve_spy_capblock_time", "20", "For how long should the spy block feature work?");
-    tf_bot_quota                         = FindConVar("tf_bot_quota");
     tf_gamemode_cp                       = FindConVar("tf_gamemode_cp");
 
     //-----------------------------------------------------//
     // EVENTS
     //-----------------------------------------------------//
     HookEvent("post_inventory_application", post_inventory_application);
+    HookEvent("player_spawn", player_spawn);
     HookEvent("teamplay_round_start", teamplay_round_start);
     HookEvent("teamplay_round_win", teamplay_round_win);
     HookEvent("teamplay_setup_finished", teamplay_setup_finished);
@@ -203,17 +209,182 @@ public OnPluginStart()
     AutoExecConfig(true, "tf_engipve");
 }
 
-public void OnConfigsExecuted()
+public void OnMapStart()
 {
-    Config_Load();
-}
+    char mapname[64];
+    GetCurrentMap(mapname, sizeof(mapname));
+    g_bIsHydro = StrEqual(mapname, "tc_hydro", false);
+    g_bIsSteel = StrEqual(mapname, "cp_steel", false);
+    g_bIsDustbowl = StrEqual(mapname, "cp_dustbowl", false);
 
-public OnMapStart()
-{
+    // Disable boss spawn on map start
+    ConVar hBossTime = FindConVar("tf_populator_active_boss_time");
+    if (hBossTime != null)
+    {
+        hBossTime.SetInt(0);
+    }
+    
+    // Config loading
+    Config_Load();
+
     g_HookHandleSwitchTeams.HookGamerules(Hook_Pre, CTFGameRules_HandleSwitchTeams);
     g_bIsRoundActive = false;
     g_bIsMultiStageMap = false;
     g_flCurrentMapTime = 0.0;
+}
+
+public Action Timer_HydroUpdateObjectiveResource(Handle timer)
+{
+    int or = FindEntityByClassname(-1, "tf_objective_resource");
+    if (or != -1)
+    {
+        SetEntProp(or, Prop_Send, "m_bPlayingMiniRounds", 0);
+        for (int i = 0; i < 6; i++)
+        {
+            SetEntProp(or, Prop_Send, "m_bCPIsVisible", 1, 1, i);
+            SetEntProp(or, Prop_Send, "m_bInMiniRound", 1, 1, i);
+        }
+        
+        bool currentReset = GetEntProp(or, Prop_Send, "m_bControlPointsReset") != 0;
+        SetEntProp(or, Prop_Send, "m_bControlPointsReset", !currentReset ? 1 : 0);
+    }
+    return Plugin_Handled;
+}
+
+void PVE_OnRoundStart_Hydro()
+{
+    // 1. Delete master and round control point entities
+    int entity = -1;
+    while ((entity = FindEntityByClassname(entity, "team_control_point_master")) != -1)
+    {
+        SetEntPropString(entity, Prop_Data, "m_iClassname", "TOBEDELETED");
+        AcceptEntityInput(entity, "Disable");
+        AcceptEntityInput(entity, "Kill");
+    }
+    entity = -1;
+    while ((entity = FindEntityByClassname(entity, "team_control_point_round")) != -1)
+    {
+        SetEntPropString(entity, Prop_Data, "m_iClassname", "TOBEDELETED");
+        AcceptEntityInput(entity, "Disable");
+        AcceptEntityInput(entity, "Kill");
+    }
+    
+    // 2. Spawn our own master
+    int cpm = CreateEntityByName("team_control_point_master");
+    if (cpm != -1)
+    {
+        DispatchKeyValue(cpm, "caplayout", "2 4,0 1 3 5");
+        DispatchKeyValue(cpm, "cpm_restrict_team_cap_win", "2"); // RED win
+        DispatchKeyValue(cpm, "switch_teams", "1");
+        DispatchKeyValue(cpm, "score_style", "0");
+        DispatchSpawn(cpm);
+        
+        AcceptEntityInput(cpm, "RoundSpawn");
+        AcceptEntityInput(cpm, "RoundActivate");
+    }
+    
+    int or = FindEntityByClassname(-1, "tf_objective_resource");
+    if (or != -1)
+    {
+        SetEntProp(or, Prop_Send, "m_bPlayingMiniRounds", 0);
+    }
+    
+    // Kill native timers
+    entity = FindEntityByClassname(-1, "timer_dred");
+    if (entity != -1) AcceptEntityInput(entity, "Kill");
+    
+    entity = FindEntityByClassname(-1, "timer_ablue");
+    if (entity != -1) AcceptEntityInput(entity, "Kill");
+    
+    // Lock points for BLU, unlock for RED
+    entity = -1;
+    while ((entity = FindEntityByClassname(entity, "trigger_capture_area")) != -1)
+    {
+        SetVariantString("2 0");
+        AcceptEntityInput(entity, "SetTeamCanCap");
+        SetVariantString("3 1");
+        AcceptEntityInput(entity, "SetTeamCanCap");
+    }
+    
+    // Change owner of points to RED
+    entity = -1;
+    while ((entity = FindEntityByClassname(entity, "team_control_point")) != -1)
+    {
+        SetVariantString("2");
+        AcceptEntityInput(entity, "Setowner");
+    }
+    
+    // Clean up spawns
+    entity = -1;
+    while ((entity = FindEntityByClassname(entity, "info_player_teamspawn")) != -1)
+    {
+        SetEntPropString(entity, Prop_Data, "m_iszControlPointName", "");
+        SetEntPropString(entity, Prop_Data, "m_iszRoundBlueSpawn", "");
+        SetEntPropString(entity, Prop_Data, "m_iszRoundRedSpawn", "");
+    }
+    
+    // Disable all hydro spawns
+    char spawns[6][] = {"BLUE", "A", "B", "C", "D", "RED"};
+    for (int i = 0; i < 6; i++)
+    {
+        PVE_SetHydroSpawnEnabled(spawns[i], 0, false);
+    }
+    
+    // Set icons
+    for (int i = 0; i < 6; i++)
+    {
+        char targetName[32];
+        Format(targetName, sizeof(targetName), "cp_%s", spawns[i]);
+        int cp = FindEntityByClassname(-1, "team_control_point");
+        while (cp != -1)
+        {
+            char name[128];
+            GetEntPropString(cp, Prop_Data, "m_iName", name, sizeof(name));
+            if (StrEqual(name, targetName, false))
+            {
+                // Note: Updating models dynamically via KeyValues post-spawn might need SetEntPropString
+                // But VScript uses KeyValueFromString and then DispatchSpawn again? We'll just ignore icons for now or use DispatchKeyValue
+                break;
+            }
+            cp = FindEntityByClassname(cp, "team_control_point");
+        }
+    }
+    
+    PVE_SetHydroSpawnEnabled("A", TFTeam_Red, true);
+    PVE_SetHydroSpawnEnabled("BLUE", TFTeam_Blue, true);
+    
+    CreateTimer(3.0, Timer_HydroUpdateObjectiveResource);
+    
+    // Fix trigger names
+    entity = -1;
+    while ((entity = FindEntityByClassname(entity, "trigger_multiple")) != -1)
+    {
+        SetEntPropString(entity, Prop_Data, "m_iName", "");
+    }
+    
+    // Disable prop signs
+    entity = -1;
+    while ((entity = FindEntityByClassname(entity, "prop_dynamic")) != -1) // propsign_* are usually prop_dynamic
+    {
+        char name[128];
+        GetEntPropString(entity, Prop_Data, "m_iName", name, sizeof(name));
+        if (StrContains(name, "propsign_", false) == 0)
+        {
+            AcceptEntityInput(entity, "Disable");
+        }
+    }
+    
+    // Kill round brushes
+    entity = -1;
+    while ((entity = FindEntityByClassname(entity, "func_brush")) != -1)
+    {
+        char name[128];
+        GetEntPropString(entity, Prop_Data, "m_iName", name, sizeof(name));
+        if (StrContains(name, "round_", false) == 0 && StrContains(name, "brush", false) != -1)
+        {
+            AcceptEntityInput(entity, "Kill");
+        }
+    }
 }
 
 public OnClientPutInServer(int client)
@@ -224,6 +395,7 @@ public OnClientPutInServer(int client)
     CreateTimer(0.1, Timer_OnClientConnect, client);
 }
 
+/*
 public bool OnClientConnect(int client, char[] rejectMsg, int maxlen)
 {
     int maxHumans = MaxClients - tf_bot_quota.IntValue;
@@ -235,6 +407,7 @@ public bool OnClientConnect(int client, char[] rejectMsg, int maxlen)
 
     return true;
 }
+*/
 
 public OnEntityCreated(int entity, const char[] szClassname)
 {
@@ -245,6 +418,12 @@ public OnEntityCreated(int entity, const char[] szClassname)
             RemoveEntity(entity);
             return;
         }
+    }
+    
+    if (StrEqual(szClassname, "trigger_capture_area"))
+    {
+        SDKHook(entity, SDKHook_Touch, OnCaptureAreaTouch);
+        SDKHook(entity, SDKHook_StartTouch, OnCaptureAreaTouch);
     }
 
     if (StrEqual(szClassname, "obj_attachment_sapper"))
@@ -482,19 +661,6 @@ void Config_DisposeOfBotItemArrayList(ArrayList array)
 // GAMEMODE STOCKS
 //-------------------------------------------------------//
 
-// Return the amount of connected(-ing) human players.
-int PVE_GetHumanCount()
-{
-    int count = 0;
-    for (int i = 1; i <= MaxClients; i++)
-    {
-        if (IsClientConnected(i) && !IsFakeClient(i))
-            count++;
-    }
-
-    return count;
-}
-
 // Give bot a name from the config
 void PVE_RenameBotClient(int client)
 {
@@ -650,66 +816,188 @@ int PVE_GiveWearableToClient(int client, int itemDef)
     return hat;
 }
 
-void PVE_EndSpyBlocking()
+void PVE_DisableCTFBLUFlag()
 {
-    if (!g_bSpyCapBlocking)
+    int flag_count = 0;
+    int flag_blu = -1;
+    int entity = -1;
+
+    while ((entity = FindEntityByClassname(entity, "item_teamflag")) != -1)
+    {
+        flag_count++;
+        int team = GetEntProp(entity, Prop_Send, "m_iTeamNum");
+        int flagtype = GetEntProp(entity, Prop_Send, "m_nType");
+        
+        // Find defending team's flag (BLU)
+        if (team == ((flagtype != 0 && flagtype != 5) ? 2 : 3))
+        {
+            flag_blu = entity;
+        }
+    }
+    
+    if (flag_count > 1 && flag_blu != -1)
+    {
+        AcceptEntityInput(flag_blu, "ForceResetAndDisableSilent");
+    }
+}
+
+bool IsAttackDefendMap()
+{
+    if (g_bIsHydro) return false; // Hydro is treated as a linear 5CP map by this plugin
+
+    // A/D maps have all their control points owned by RED (2) by default.
+    // Symmetrical 5CP maps have at least one neutral control point (0) by default (the mid point).
+    int ent = -1;
+    bool hasNeutralPoint = false;
+    while ((ent = FindEntityByClassname(ent, "team_control_point")) != -1)
+    {
+        if (GetEntProp(ent, Prop_Data, "m_iDefaultOwner") == 0)
+        {
+            hasNeutralPoint = true;
+            break;
+        }
+    }
+    return !hasNeutralPoint;
+}
+
+void PVE_SetupMapControlPoints()
+{
+    if (g_bIsSteel || IsAttackDefendMap())
     {
         return;
     }
 
-    g_bSpyCapBlocking = false;
-
-    for (int i = 1; i <= MaxClients; i++)
+    char mapname[128];
+    GetCurrentMap(mapname, sizeof(mapname));
+    bool isHydro = (StrContains(mapname, "tc_hydro") != -1);
+    
+    if (isHydro)
     {
-        if (!IsClientInGame(i))
+        int roundEnt = -1;
+        while ((roundEnt = FindEntityByClassname(roundEnt, "team_control_point_round")) != -1)
         {
-            continue;
+            AcceptEntityInput(roundEnt, "Kill");
         }
+    }
+    
+    // Prevent RED from winning by setting m_iInvalidCapWinner on master
+    int master = FindEntityByClassname(-1, "team_control_point_master");
+    if (master != -1)
+    {
+        SetEntProp(master, Prop_Data, "m_iInvalidCapWinner", 2); // 2 is RED
+    }
 
-        PVE_EnableCapture(i);
+    int points[16];
+    int pointCount = 0;
+    
+    int cp = -1;
+    while ((cp = FindEntityByClassname(cp, "team_control_point")) != -1 && pointCount < 16)
+    {
+        points[pointCount++] = cp;
+    }
+    
+    if (pointCount <= 1) return;
+    
+    // Sort points by m_iPointIndex
+    for (int i = 0; i < pointCount - 1; i++)
+    {
+        for (int j = 0; j < pointCount - i - 1; j++)
+        {
+            int idx1 = GetEntProp(points[j], Prop_Data, "m_iPointIndex");
+            int idx2 = GetEntProp(points[j+1], Prop_Data, "m_iPointIndex");
+            if (idx1 > idx2)
+            {
+                int temp = points[j];
+                points[j] = points[j+1];
+                points[j+1] = temp;
+            }
+        }
+    }
+    
+    int or = FindEntityByClassname(-1, "tf_objective_resource");
+    
+    // Give all points to RED and setup linear capture for BLU
+    int bluStartPoint = -1;
+    if (GetEntProp(points[pointCount - 1], Prop_Data, "m_iTeamNum") == 3 || GetEntProp(points[pointCount - 1], Prop_Data, "m_iDefaultOwner") == 3)
+    {
+        bluStartPoint = pointCount - 1;
+    }
+    else
+    {
+        bluStartPoint = 0; // Fallback to 0 if we can't tell, or if BLU owns 0.
+    }
+
+    for (int i = 0; i < pointCount; i++)
+    {
+        int ent = points[i];
+        int point_index = GetEntProp(ent, Prop_Data, "m_iPointIndex");
+        
+        int state = GameRules_GetProp("m_iRoundState");
+        GameRules_SetProp("m_iRoundState", 4); // GR_STATE_RND_RUNNING
+        
+        SetVariantString("2");
+        AcceptEntityInput(ent, "SetOwner", ent, ent);
+        SetVariantInt(2);
+        AcceptEntityInput(ent, "SetOwner", ent, ent);
+        
+        SetEntProp(ent, Prop_Data, "m_iTeamNum", 2);
+        SetEntProp(ent, Prop_Data, "m_iDefaultOwner", 2);
+        
+        GameRules_SetProp("m_iRoundState", state);
+        
+        char prevName[128] = "";
+        int prev_point_index = -1;
+        
+        if (bluStartPoint == pointCount - 1)
+        {
+            // BLU captures from highest index down to 0
+            if (i < pointCount - 1)
+            {
+                GetEntPropString(points[i+1], Prop_Data, "m_iName", prevName, sizeof(prevName));
+                prev_point_index = GetEntProp(points[i+1], Prop_Data, "m_iPointIndex");
+            }
+        }
+        else
+        {
+            // BLU captures from 0 up to highest index
+            if (i > 0)
+            {
+                GetEntPropString(points[i-1], Prop_Data, "m_iName", prevName, sizeof(prevName));
+                prev_point_index = GetEntProp(points[i-1], Prop_Data, "m_iPointIndex");
+            }
+        }
+        
+        DispatchKeyValue(ent, "team_previouspoint_3_0", prevName);
+        DispatchKeyValue(ent, "team_previouspoint_3_1", "");
+        DispatchKeyValue(ent, "team_previouspoint_3_2", "");
+        
+        // Prevent RED from ever capturing by requiring an impossible point
+        DispatchKeyValue(ent, "team_previouspoint_2_0", "PVE_LOCKED_POINT_IMPOSSIBLE");
+        DispatchKeyValue(ent, "team_previouspoint_2_1", "");
+        DispatchKeyValue(ent, "team_previouspoint_2_2", "");
+
+        if (or != -1)
+        {
+            SetEntProp(or, Prop_Send, "m_iOwner", 2, _, point_index);
+            
+            // Allow BLU (Team 3) to cap
+            SetEntProp(or, Prop_Send, "m_bTeamCanCap", 1, _, point_index + 3 * 8);
+            // Prevent RED (Team 2) from capping
+            SetEntProp(or, Prop_Send, "m_bTeamCanCap", 0, _, point_index + 2 * 8);
+            
+            int iIntIndexBLU = (3 * 8 * 3) + (point_index * 3); // 72 + point_index * 3
+            
+            SetEntProp(or, Prop_Send, "m_iPreviousPoints", prev_point_index, _, iIntIndexBLU + 0);
+            SetEntProp(or, Prop_Send, "m_iPreviousPoints", -1, _, iIntIndexBLU + 1);
+            SetEntProp(or, Prop_Send, "m_iPreviousPoints", -1, _, iIntIndexBLU + 2);
+        }
     }
 }
 
-void PVE_StartSpyBlocking()
+public Action Timer_SetupMapControlPoints(Handle timer)
 {
-    if (g_bSpyCapBlocking)
-    {
-        return;
-    }
-
-    if (sm_engipve_spy_capblock_time.FloatValue <= 0)
-    {
-        return;
-    }
-
-    g_bSpyCapBlocking = true;
-    CreateTimer(sm_engipve_spy_capblock_time.FloatValue, Timer_DisableSpyBlocking);
-
-    for (int i = 1; i <= MaxClients; i++)
-    {
-        if (!IsClientInGame(i))
-        {
-            continue;
-        }
-
-        if (TF2_GetPlayerClass(i) != TFClass_Spy)
-        {
-            continue;
-        }
-
-        PrintHintText(i, "Capturing points is not allowed for Spies for the next %.2f seconds", sm_engipve_spy_capblock_time.FloatValue);
-        PVE_DisableCapture(i);
-    }
-}
-
-void PVE_DisableCapture(int client)
-{
-    TF2Attrib_SetByName(client, "increase player capture value", -1.0);
-}
-
-void PVE_EnableCapture(int client)
-{
-    TF2Attrib_RemoveByName(client, "increase player capture value");
+    PVE_SetupMapControlPoints();
+    return Plugin_Stop;
 }
 
 //-------------------------------------------------------//
@@ -766,17 +1054,30 @@ public Action post_inventory_application(Event event, const char[] name, bool do
         PVE_EquipBotItems(client);
         PVE_ApplyPlayerAttributes(client);
     }
-    else {
-        if (g_bSpyCapBlocking && TF2_GetPlayerClass(client) == TFClass_Spy)
-        {
-            PVE_DisableCapture(client);
-        }
-        else {
-            PVE_EnableCapture(client);
-        }
+
+    return Plugin_Continue;
+}
+
+public Action player_spawn(Event event, const char[] name, bool dontBroadcast)
+{
+    int client = GetClientOfUserId(event.GetInt("userid"));
+    if (g_bIsSteel && g_bForceBotSpawnActive && IsFakeClient(client))
+    {
+        // Teleport the bot to the forced spawn location after a short delay
+        CreateTimer(0.1, Timer_TeleportBot, GetClientUserId(client));
     }
 
     return Plugin_Continue;
+}
+
+public Action Timer_TeleportBot(Handle timer, any userid)
+{
+    int client = GetClientOfUserId(userid);
+    if (client > 0 && IsClientInGame(client) && IsPlayerAlive(client) && g_bIsSteel && g_bForceBotSpawnActive)
+    {
+        TeleportEntity(client, g_vecForceBotSpawn, NULL_VECTOR, NULL_VECTOR);
+    }
+    return Plugin_Handled;
 }
 
 public Action player_death(Event event, const char[] name, bool dontBroadcast)
@@ -816,17 +1117,125 @@ public Action teamplay_setup_finished(Event event, const char[] name, bool dontB
     }
     g_eTeamRoundTimer  = FindEntityByClassname(-1, "team_round_timer");
 
+    PVE_DisableCTFBLUFlag();
+    CreateTimer(0.1, Timer_SetupMapControlPoints);
+
+    if (g_bIsDustbowl && g_iDustbowlStage >= 2)
+    {
+        g_bIsFakeSetupActive = true;
+        g_flFakeSetupEndTime = GetGameTime() + 90.0;
+        PrintCenterTextAll("Setup time: 90 seconds!");
+    }
+
     return Plugin_Continue;
 }
 
 public Action teamplay_point_captured(Event event, const char[] name, bool dontBroadcast)
 {
+    if (g_bIsHydro)
+    {
+        char pointorder[6][] = {"BLUE", "A", "B", "C", "D", "RED"};
+        int team = GetEventInt(event, "team");
+        int point = GetEventInt(event, "cp");
+        
+        // Re-enable correct sign
+        int entity = -1;
+        while ((entity = FindEntityByClassname(entity, "prop_dynamic")) != -1)
+        {
+            char nameEntity[128];
+            GetEntPropString(entity, Prop_Data, "m_iName", nameEntity, sizeof(nameEntity));
+            if (StrContains(nameEntity, "propsign_", false) == 0)
+            {
+                AcceptEntityInput(entity, "Disable");
+            }
+        }
+        
+        char targetSign[64];
+        char signSuffix[6][] = {"luetoa", "tob", "toc", "tod", "tored", ""};
+        for (int i = 0; i < 5; i++)
+        {
+            Format(targetSign, sizeof(targetSign), "propsign_%s%s", pointorder[i], signSuffix[point]);
+            entity = -1;
+            while ((entity = FindEntityByClassname(entity, "prop_dynamic")) != -1)
+            {
+                char nameEntity[128];
+                GetEntPropString(entity, Prop_Data, "m_iName", nameEntity, sizeof(nameEntity));
+                if (StrEqual(nameEntity, targetSign, false))
+                {
+                    AcceptEntityInput(entity, "Enable");
+                    SetVariantInt(1);
+                    AcceptEntityInput(entity, "Skin");
+                }
+            }
+        }
+        
+        if (point != 0 && point != 5)
+        {
+            PVE_SetHydroSpawnEnabled(pointorder[point - 1], team == view_as<int>(TFTeam_Red) ? view_as<int>(TFTeam_Blue) : 0, team == view_as<int>(TFTeam_Blue));
+            PVE_SetHydroSpawnEnabled(pointorder[point], team, team == view_as<int>(TFTeam_Blue));
+            PVE_SetHydroSpawnEnabled(pointorder[point + 1], team == view_as<int>(TFTeam_Blue) ? view_as<int>(TFTeam_Red) : 0, team == view_as<int>(TFTeam_Blue));
+        }
+    }
+
+    if (g_bIsFakeSetupActive)
+    {
+        return Plugin_Handled;
+    }
+
     if (!tf_gamemode_cp.BoolValue)
     {
         return Plugin_Continue;
     }
 
-    PVE_StartSpyBlocking();
+    int cp = event.GetInt("cp");
+    int team = event.GetInt("team");
+    
+    // Dynamically clear the requirement for the next point to forcefully unlock it
+    if (team == 3 && !g_bIsSteel && !IsAttackDefendMap()) // BLU
+    {
+        int or = FindEntityByClassname(-1, "tf_objective_resource");
+        if (or != -1)
+        {
+            for (int i = 0; i < 8; i++)
+            {
+                int prev_point = GetEntProp(or, Prop_Send, "m_iPreviousPoints", _, (3 * 8 * 3) + (i * 3));
+                if (prev_point == cp)
+                {
+                    // This point (index i) required the point we just captured. Force it to unlock!
+                    SetEntProp(or, Prop_Send, "m_iPreviousPoints", -1, _, (3 * 8 * 3) + (i * 3));
+                    SetEntProp(or, Prop_Send, "m_bTeamCanCap", 1, _, i + 3 * 8);
+                    
+                    int ent = -1;
+                    while ((ent = FindEntityByClassname(ent, "team_control_point")) != -1)
+                    {
+                        if (GetEntProp(ent, Prop_Data, "m_iPointIndex") == i)
+                        {
+                            DispatchKeyValue(ent, "team_previouspoint_3_0", "");
+                            DispatchKeyValue(ent, "team_previouspoint_3_1", "");
+                            DispatchKeyValue(ent, "team_previouspoint_3_2", "");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (g_bIsSteel)
+    {
+        if (g_bSteelFirstCap)
+        {
+            g_bForceBotSpawnActive = true;
+            g_vecForceBotSpawn[0] = 400.0;
+            g_vecForceBotSpawn[1] = -1024.0;
+            g_vecForceBotSpawn[2] = -125.0;
+        }
+        else
+        {
+            g_bForceBotSpawnActive = false;
+        }
+        g_bSteelFirstCap = false;
+    }
+
     return Plugin_Continue;
 }
 
@@ -852,16 +1261,101 @@ public Action teamplay_round_win(Event event, const char[] name, bool dontBroadc
     return Plugin_Continue;
 }
 
+public Action Timer_HydroRespawnAll(Handle timer)
+{
+    for (int i = 1; i <= MaxClients; i++)
+    {
+        if (IsClientInGame(i) && GetClientTeam(i) > 1) // Team 2 (RED) or 3 (BLU)
+        {
+            TF2_RespawnPlayer(i);
+        }
+    }
+    return Plugin_Handled;
+}
+
 public Action teamplay_round_start(Event event, const char[] name, bool dontBroadcast)
 {
+    if (g_bIsHydro)
+    {
+        PVE_OnRoundStart_Hydro();
+        // Spawns were just reconfigured, but players might have already spawned in the wrong places!
+        CreateTimer(0.1, Timer_HydroRespawnAll);
+    }
+    
+    if (g_bIsSteel)
+    {
+        g_bSteelFirstCap = true;
+        g_bForceBotSpawnActive = false;
+        PVE_SetRequiredCapturePoint("final_cap_flag", "cap_d_flag", TFTeam_Humans);
+    }
+
     int FullReset = event.GetInt("full_reset");
     if (FullReset > 0) {
         g_bIsMultiStageMap = false;
         g_flCurrentMapTime = 0.0;
+        g_iDustbowlStage = 1;
     }
+    else
+    {
+        if (g_bIsDustbowl)
+        {
+            g_iDustbowlStage++;
+            
+            // Bypass native setup time on stages 2 and 3 so fake setup can start immediately and bots can move
+            if (g_iDustbowlStage >= 2)
+            {
+                int timer = -1;
+                while ((timer = FindEntityByClassname(timer, "team_round_timer")) != -1)
+                {
+                    if (GetEntProp(timer, Prop_Send, "m_bIsSetupTimer"))
+                    {
+                        SetEntProp(timer, Prop_Send, "m_nSetupTimeLength", 1);
+                        SetVariantInt(1);
+                        AcceptEntityInput(timer, "SetTime");
+                    }
+                }
+            }
+        }
+    }
+    
+    g_flRoundStartTime = GetGameTime();
 
     g_bIsRoundEnd    = false;
     g_bIsRoundActive = false;
+
+    // Timer Modification: Find or Create a timer for all maps to act as a stopwatch
+    g_eTeamRoundTimer = FindEntityByClassname(-1, "team_round_timer");
+    if (g_eTeamRoundTimer == -1)
+    {
+        g_eTeamRoundTimer = CreateEntityByName("team_round_timer");
+        if (g_eTeamRoundTimer != -1)
+        {
+            DispatchKeyValue(g_eTeamRoundTimer, "show_in_hud", "1");
+            DispatchKeyValue(g_eTeamRoundTimer, "timer_length", "99999");
+            DispatchSpawn(g_eTeamRoundTimer);
+        }
+    }
+    
+    if (g_eTeamRoundTimer != -1)
+    {
+        SetVariantInt(1);
+        AcceptEntityInput(g_eTeamRoundTimer, "ShowInHUD");
+        AcceptEntityInput(g_eTeamRoundTimer, "Enable");
+    }
+
+    // If there is no setup time on this map, start a fake setup time instead!
+    if (!GameRules_GetProp("m_bInSetup"))
+    {
+        g_bIsFakeSetupActive = true;
+        g_flFakeSetupEndTime = GetGameTime() + 90.0;
+        g_bIsRoundActive   = false;
+        
+        PVE_SetBluSpawnDoorsState(true); // Lock the doors!
+        PrintCenterTextAll("Setup time: 90 seconds!");
+    }
+
+    PVE_DisableCTFBLUFlag();
+    CreateTimer(0.1, Timer_SetupMapControlPoints);
 
     return Plugin_Continue;
 }
@@ -887,26 +1381,109 @@ public Action Timer_RespawnBot(Handle timer, any client)
     return Plugin_Handled;
 }
 
-public Action Timer_DisableSpyBlocking(Handle timer, any client)
+void PVE_SetBluSpawnDoorsState(bool bLock)
 {
-    PVE_EndSpyBlocking();
+    // Modify team filters so BLU players are blocked by spawn room triggers/doors
+    // This perfectly replicates the VScript method without locking normal 'blu' doors
+    char filterClasses[2][] = {"filter_activator_tfteam", "filter_activator_team"};
+    for (int i = 0; i < sizeof(filterClasses); i++)
+    {
+        int filter = -1;
+        while ((filter = FindEntityByClassname(filter, filterClasses[i])) != -1)
+        {
+            if (HasEntProp(filter, Prop_Data, "m_iTeamNum"))
+            {
+                int currentTeam = GetEntProp(filter, Prop_Data, "m_iTeamNum");
+                if (bLock)
+                {
+                    if (currentTeam == view_as<int>(TFTeam_Humans)) // Team 3 (BLU)
+                    {
+                        SetEntProp(filter, Prop_Data, "m_iTeamNum", 5); // Lock it for BLU by setting to Unassigned (5)
+                    }
+                }
+                else
+                {
+                    if (currentTeam == 5) // Was overridden to 5
+                    {
+                        SetEntProp(filter, Prop_Data, "m_iTeamNum", view_as<int>(TFTeam_Humans)); // Restore to BLU
+                    }
+                }
+            }
+        }
+    }
+}
+
+public Action Timer_EnableTriggers(Handle timer)
+{
+    int trigger = -1;
+    while ((trigger = FindEntityByClassname(trigger, "trigger_multiple")) != -1)
+    {
+        if (IsValidEntity(trigger))
+        {
+            AcceptEntityInput(trigger, "Enable");
+        }
+    }
     return Plugin_Handled;
+}
+
+void PVE_RefreshDoorTriggers()
+{
+    // Find all trigger_multiple and Disable them, then Enable them 0.1s later.
+    // This forces them to re-evaluate their Touch events, opening doors if a player is standing in them.
+    int trigger = -1;
+    while ((trigger = FindEntityByClassname(trigger, "trigger_multiple")) != -1)
+    {
+        if (IsValidEntity(trigger) && !GetEntProp(trigger, Prop_Data, "m_bDisabled"))
+        {
+            AcceptEntityInput(trigger, "Disable");
+        }
+    }
+    CreateTimer(0.1, Timer_EnableTriggers);
 }
 
 public Action Timer_UpdateRoundTime(Handle timer, any ent)
 {
+    if (g_eTeamRoundTimer <= 0)
+    {
+        return Plugin_Handled;
+    }
+
+    float curTime = GetGameTime();
+
+    if (g_bIsFakeSetupActive)
+    {
+        float remaining = g_flFakeSetupEndTime - curTime;
+        if (remaining <= 0.0)
+        {
+            // Fake setup time is over!
+            g_bIsFakeSetupActive = false;
+            g_bIsRoundActive = true;
+            g_flRoundStartTime = curTime;
+            
+            PVE_SetBluSpawnDoorsState(false); // Unlock doors!
+            PVE_RefreshDoorTriggers(); // Force triggers to re-evaluate so doors open!
+            PrintCenterTextAll("Setup time is over! Defend!");
+        }
+        else
+        {
+            // Update HUD timer to show fake setup countdown
+            int iRemaining = RoundToCeil(remaining);
+            SetVariantInt(iRemaining);
+            AcceptEntityInput(g_eTeamRoundTimer, "SetMaxTime");
+            SetVariantInt(iRemaining);
+            AcceptEntityInput(g_eTeamRoundTimer, "SetTime");
+            AcceptEntityInput(g_eTeamRoundTimer, "Pause");
+
+            return Plugin_Handled;
+        }
+    }
+
     // Round is not active - do nothing.
     if (!g_bIsRoundActive)
     {
         return Plugin_Handled;
     }
 
-    if (g_eTeamRoundTimer <= 0)
-    {
-        return Plugin_Handled;
-    }
-
-    float curTime    = GetGameTime();
     float startTime  = g_flRoundStartTime;
     float elapsTime  = curTime - startTime;
     int   iElapsTime = RoundToFloor(elapsTime);
@@ -923,6 +1500,34 @@ public Action Timer_UpdateRoundTime(Handle timer, any ent)
 //-------------------------------------------------------//
 // SDK Hooks
 //-------------------------------------------------------//
+public Action OnCaptureAreaTouch(int entity, int other)
+{
+    // Ignore non-players
+    if (other <= 0 || other > MaxClients)
+    {
+        return Plugin_Continue;
+    }
+
+    if (!tf_gamemode_cp.BoolValue)
+    {
+        return Plugin_Continue;
+    }
+
+    if ((g_bIsHydro || g_bIsDustbowl) && g_bIsFakeSetupActive)
+    {
+        // Block all captures during fake setup time
+        return Plugin_Handled;
+    }
+
+    if (GetClientTeam(other) == 2) // RED team
+    {
+        // Block RED team entirely from even registering as standing on the capture area
+        return Plugin_Handled;
+    }
+
+    return Plugin_Continue;
+}
+
 public Action OnSapperTakeDamage(int victim, int& attacker, int& inflictor, float& damage, int& damagetype)
 {
     if (!sm_engipve_bot_sapper_insta_remove.BoolValue)
@@ -1062,4 +1667,141 @@ void PerformEnclosureFixes(bool apply)
         vecPos[2] += apply ? upOffset : -upOffset;
         SetEntPropVector(point, Prop_Data, "m_vecAbsOrigin", vecPos);
     }
+}
+
+void PVE_SetHydroSpawnEnabled(const char[] spawnname, int team, bool bForward)
+{
+    char target[128];
+    int entity = -1;
+    
+    // spawnpoints
+    Format(target, sizeof(target), "spawn_%s", spawnname);
+    while ((entity = FindEntityByClassname(entity, "info_player_teamspawn")) != -1)
+    {
+        char name[128];
+        GetEntPropString(entity, Prop_Data, "m_iName", name, sizeof(name));
+        if (StrEqual(name, target, false))
+        {
+            SetVariantInt(team != 0 ? team : 1);
+            AcceptEntityInput(entity, "SetTeam");
+            AcceptEntityInput(entity, team != 0 ? "Enable" : "Disable");
+        }
+    }
+    
+    // spawnrooms
+    Format(target, sizeof(target), "spawn_%s_trigger", spawnname);
+    entity = -1;
+    while ((entity = FindEntityByClassname(entity, "func_respawnroom")) != -1)
+    {
+        char name[128];
+        GetEntPropString(entity, Prop_Data, "m_iName", name, sizeof(name));
+        if (StrEqual(name, target, false))
+        {
+            SetVariantInt(team);
+            AcceptEntityInput(entity, "SetTeam");
+            if (team != 0)
+            {
+                SetVariantString("3"); // Apply to BLU
+                AcceptEntityInput(entity, "SetActive");
+                SetVariantString("2"); // Apply to RED
+                AcceptEntityInput(entity, "SetActive");
+            }
+            else
+            {
+                SetVariantString("3");
+                AcceptEntityInput(entity, "SetInactive");
+                SetVariantString("2");
+                AcceptEntityInput(entity, "SetInactive");
+            }
+        }
+    }
+    
+    // filter_team_
+    Format(target, sizeof(target), "filter_team_%s", spawnname);
+    entity = -1;
+    while ((entity = FindEntityByClassname(entity, "filter_activator_tfteam")) != -1)
+    {
+        char name[128];
+        GetEntPropString(entity, Prop_Data, "m_iName", name, sizeof(name));
+        if (StrEqual(name, target, false))
+        {
+            SetEntProp(entity, Prop_Data, "m_iTeamNum", team == view_as<int>(TFTeam_Red) ? view_as<int>(TFTeam_Red) : 0); // 2 or 0
+            SetEntProp(entity, Prop_Data, "m_bNegated", team != view_as<int>(TFTeam_Red) && bForward ? 1 : 0);
+        }
+    }
+    
+    // visualizers (delayed)
+    CreateTimer(0.1, Timer_UpdateHydroVisualizers);
+}
+
+void PVE_SetRequiredCapturePoint(const char[] point_name, const char[] prev_point_name, TFTeam team)
+{
+    int point = FindEntityByClassname(-1, "team_control_point");
+    int point_ent = -1;
+    int prev_point_ent = -1;
+
+    while (point != -1)
+    {
+        char name[64];
+        GetEntPropString(point, Prop_Data, "m_iName", name, sizeof(name));
+        if (StrEqual(name, point_name))
+        {
+            point_ent = point;
+        }
+        if (StrEqual(name, prev_point_name))
+        {
+            prev_point_ent = point;
+        }
+        point = FindEntityByClassname(point, "team_control_point");
+    }
+
+    if (point_ent == -1)
+    {
+        return;
+    }
+
+    int point_index = GetEntProp(point_ent, Prop_Data, "m_iPointIndex");
+    int prev_point_index = (prev_point_ent != -1) ? GetEntProp(prev_point_ent, Prop_Data, "m_iPointIndex") : -1;
+
+    // We must find the objective resource and update m_iPreviousPoints
+    int or = FindEntityByClassname(-1, "tf_objective_resource");
+    if (or != -1)
+    {
+        // MAX_PREVIOUS_POINTS = 3, MAX_CONTROL_POINTS = 8
+        // iIntIndex = (point_index * MAX_PREVIOUS_POINTS) + (team * MAX_CONTROL_POINTS * MAX_PREVIOUS_POINTS)
+        int iIntIndex = (point_index * 3) + (view_as<int>(team) * 8 * 3);
+        SetEntProp(or, Prop_Send, "m_iPreviousPoints", prev_point_index, 1, iIntIndex + 0);
+        SetEntProp(or, Prop_Send, "m_iPreviousPoints", -1, 1, iIntIndex + 1);
+        SetEntProp(or, Prop_Send, "m_iPreviousPoints", -1, 1, iIntIndex + 2);
+    }
+    
+    // Actually set the internal capture requirement logic so the engine enforces it
+    char keyname[64];
+    Format(keyname, sizeof(keyname), "team_previouspoint_%d_0", view_as<int>(team));
+    DispatchKeyValue(point_ent, keyname, prev_point_ent != -1 ? prev_point_name : "");
+    Format(keyname, sizeof(keyname), "team_previouspoint_%d_1", view_as<int>(team));
+    DispatchKeyValue(point_ent, keyname, "");
+    Format(keyname, sizeof(keyname), "team_previouspoint_%d_2", view_as<int>(team));
+    DispatchKeyValue(point_ent, keyname, "");
+    
+    int state = GameRules_GetProp("m_iRoundState");
+    GameRules_SetProp("m_iRoundState", 4);
+    SetVariantString(team == TFTeam_Red ? "3" : "2"); // opposing team
+    AcceptEntityInput(point_ent, "SetOwner", point_ent, point_ent);
+    GameRules_SetProp("m_iRoundState", state);
+}
+
+public Action Timer_UpdateHydroVisualizers(Handle timer)
+{
+    int entity = -1;
+    while ((entity = FindEntityByClassname(entity, "func_respawnroomvisualizer")) != -1)
+    {
+        if (HasEntProp(entity, Prop_Send, "m_iTeamNum"))
+        {
+            int team = GetEntProp(entity, Prop_Send, "m_iTeamNum");
+            SetVariantInt(team == view_as<int>(TFTeam_Red) ? 1 : 0);
+            AcceptEntityInput(entity, "SetSolid");
+        }
+    }
+    return Plugin_Handled;
 }
