@@ -279,6 +279,8 @@ void PVE_OnRoundStart_Hydro()
         AcceptEntityInput(cpm, "RoundActivate");
     }
     
+    PVE_SetRequiredCapturePoint("cp_a", "cp_blue", TFTeam_Humans);
+    
     int or = FindEntityByClassname(-1, "tf_objective_resource");
     if (or != -1)
     {
@@ -837,9 +839,61 @@ void PVE_DisableCTFBLUFlag()
     }
 }
 
+bool IsAttackDefenseMode()
+{
+    if (g_bIsHydro) return false;
+
+    char mapname[128];
+    GetCurrentMap(mapname, sizeof(mapname));
+    
+    // Explicit map name checks for known A/D maps
+    if (StrContains(mapname, "gorge", false) != -1 && StrContains(mapname, "5gorge", false) == -1) return true;
+    if (StrContains(mapname, "mercenarypark", false) != -1) return true;
+    if (StrContains(mapname, "dustbowl", false) != -1) return true;
+    if (StrContains(mapname, "gravelpit", false) != -1) return true;
+    if (StrContains(mapname, "egypt", false) != -1) return true;
+    if (StrContains(mapname, "mountainlab", false) != -1) return true;
+    if (StrContains(mapname, "mossrock", false) != -1) return true;
+    if (StrContains(mapname, "snowplow", false) != -1) return true;
+    if (StrContains(mapname, "degrootkeep", false) != -1) return true;
+    if (StrContains(mapname, "manor_event", false) != -1) return true;
+    if (StrContains(mapname, "steel", false) != -1) return true;
+
+    if (FindEntityByClassname(-1, "tf_logic_attack_defend") != -1) return true;
+    if (FindEntityByClassname(-1, "team_train_watcher") != -1) return true;
+
+    // Check master
+    int master = FindEntityByClassname(-1, "team_control_point_master");
+    if (master != -1)
+    {
+        if (HasEntProp(master, Prop_Send, "m_bPlayingDefendForAllPoints"))
+            return GetEntProp(master, Prop_Send, "m_bPlayingDefendForAllPoints") != 0;
+        if (HasEntProp(master, Prop_Data, "m_bPlayingDefendForAllPoints"))
+            return GetEntProp(master, Prop_Data, "m_bPlayingDefendForAllPoints") != 0;
+    }
+
+    // Check gamerules
+    int gr = FindEntityByClassname(-1, "tf_gamerules");
+    if (gr != -1)
+    {
+        if (HasEntProp(gr, Prop_Send, "m_bPlayingDefendForAllPoints"))
+            return GetEntProp(gr, Prop_Send, "m_bPlayingDefendForAllPoints") != 0;
+    }
+
+    // Check objective resource just in case
+    int or = FindEntityByClassname(-1, "tf_objective_resource");
+    if (or != -1)
+    {
+        if (HasEntProp(or, Prop_Send, "m_bPlayingDefendForAllPoints"))
+            return GetEntProp(or, Prop_Send, "m_bPlayingDefendForAllPoints") != 0;
+    }
+
+    return false;
+}
+
 void PVE_SetupMapControlPoints()
 {
-    if (g_bIsSteel)
+    if (g_bIsSteel || IsAttackDefenseMode())
     {
         return;
     }
@@ -853,7 +907,16 @@ void PVE_SetupMapControlPoints()
         int roundEnt = -1;
         while ((roundEnt = FindEntityByClassname(roundEnt, "team_control_point_round")) != -1)
         {
-            AcceptEntityInput(roundEnt, "Kill");
+            SetEntPropString(roundEnt, Prop_Data, "m_iClassname", "TOBEDELETED");
+            AcceptEntityInput(roundEnt, "Disable");
+            // DO NOT call Kill() here as it crashes the engine on map change!
+        }
+        int masterEnt = -1;
+        while ((masterEnt = FindEntityByClassname(masterEnt, "team_control_point_master")) != -1)
+        {
+            SetEntPropString(masterEnt, Prop_Data, "m_iClassname", "TOBEDELETED");
+            AcceptEntityInput(masterEnt, "Disable");
+            // DO NOT call Kill() here either.
         }
     }
     
@@ -1161,7 +1224,7 @@ public Action teamplay_point_captured(Event event, const char[] name, bool dontB
     int team = event.GetInt("team");
     
     // Dynamically clear the requirement for the next point to forcefully unlock it
-    if (team == 3 && !g_bIsSteel) // BLU
+    if (team == 3 && !g_bIsSteel && !IsAttackDefenseMode()) // BLU
     {
         int or = FindEntityByClassname(-1, "tf_objective_resource");
         if (or != -1)
@@ -1183,6 +1246,7 @@ public Action teamplay_point_captured(Event event, const char[] name, bool dontB
                             DispatchKeyValue(ent, "team_previouspoint_3_0", "");
                             DispatchKeyValue(ent, "team_previouspoint_3_1", "");
                             DispatchKeyValue(ent, "team_previouspoint_3_2", "");
+                            
                             break;
                         }
                     }
