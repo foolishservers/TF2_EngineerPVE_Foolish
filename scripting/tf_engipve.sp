@@ -1202,11 +1202,30 @@ public Action teamplay_point_captured(Event event, const char[] name, bool dontB
             }
         }
         
-        if (point != 0 && point != 5)
+        if (point == 5)
         {
-            PVE_SetHydroSpawnEnabled(pointorder[point - 1], team == view_as<int>(TFTeam_Red) ? view_as<int>(TFTeam_Blue) : 0, team == view_as<int>(TFTeam_Blue));
+            int winEnt = CreateEntityByName("game_round_win");
+            if (winEnt != -1)
+            {
+                DispatchKeyValue(winEnt, "force_map_reset", "1");
+                DispatchSpawn(winEnt);
+
+                SetVariantInt(team);
+                AcceptEntityInput(winEnt, "SetTeam");
+                AcceptEntityInput(winEnt, "RoundWin");
+            }
+        }
+        else
+        {
+            if (point != 0)
+            {
+                PVE_SetHydroSpawnEnabled(pointorder[point - 1], team == view_as<int>(TFTeam_Red) ? view_as<int>(TFTeam_Blue) : 0, team == view_as<int>(TFTeam_Blue));
+            }
             PVE_SetHydroSpawnEnabled(pointorder[point], team, team == view_as<int>(TFTeam_Blue));
-            PVE_SetHydroSpawnEnabled(pointorder[point + 1], team == view_as<int>(TFTeam_Blue) ? view_as<int>(TFTeam_Red) : 0, team == view_as<int>(TFTeam_Blue));
+            if (point != 5)
+            {
+                PVE_SetHydroSpawnEnabled(pointorder[point + 1], team == view_as<int>(TFTeam_Blue) ? view_as<int>(TFTeam_Red) : 0, team == view_as<int>(TFTeam_Blue));
+            }
         }
     }
 
