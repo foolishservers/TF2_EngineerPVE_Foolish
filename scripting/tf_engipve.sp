@@ -109,6 +109,10 @@ float         g_flRoundStartTime      = 0.0;
 float         g_flCurrentMapTime      = 0.0;
 // Is this map a multistage map
 bool          g_bIsMultiStageMap      = false;
+Handle        g_hScalingHudSync       = null;
+int           g_iLastBonusPercent     = 0;
+int           g_iCapturedPoints       = 0;
+float         g_flBotUberEndTime      = 0.0;
 
 // List of entities that need to be cleaned up on arrival to save
 // on edict count.
@@ -130,6 +134,7 @@ char          g_szCleanupEntities[][] = {
 public OnPluginStart()
 {
     GameData conf = new GameData("tf2.engipve");
+    g_hScalingHudSync = CreateHudSynchronizer();
     CreateTimer(0.5, Timer_UpdateRoundTime, _, TIMER_REPEAT);
 
     //-----------------------------------------------------//
@@ -227,6 +232,9 @@ public void OnMapStart()
     g_bIsRoundActive = false;
     g_bIsMultiStageMap = false;
     g_flCurrentMapTime = 0.0;
+    g_iLastBonusPercent = 0;
+    g_iCapturedPoints = 0;
+    g_flBotUberEndTime = 0.0;
 }
 
 public Action Timer_HydroUpdateObjectiveResource(Handle timer)
@@ -660,6 +668,41 @@ void Config_DisposeOfBotItemArrayList(ArrayList array)
 //-------------------------------------------------------//
 
 // Give bot a name from the config
+int PVE_GetHumanCount()
+{
+    int count = 0;
+    for (int i = 1; i <= MaxClients; i++)
+    {
+        if (IsClientInGame(i) && !IsFakeClient(i) && TF2_GetClientTeam(i) == TFTeam_Humans)
+        {
+            count++;
+        }
+    }
+    return count;
+}
+
+int PVE_GetTotalScalingBonusPercent()
+{
+    int extraPlayers = PVE_GetHumanCount() - 6;
+    if (extraPlayers < 0)
+    {
+        extraPlayers = 0;
+    }
+
+    int captureBonusPercent = 0;
+    for (int i = 1; i <= g_iCapturedPoints; i++)
+    {
+        captureBonusPercent += 20 + (i * 10); // 1회: +30%, 2회: +40%, 3회: +50%, 4회: +60% ... 누적
+    }
+
+    return (extraPlayers * 10) + captureBonusPercent;
+}
+
+float PVE_GetBotScalingMultiplier()
+{
+    return 1.0 + (float(PVE_GetTotalScalingBonusPercent()) * 0.01);
+}
+
 void PVE_RenameBotClient(int client)
 {
     // Figure out the name of the bot.
@@ -708,6 +751,12 @@ void PVE_EquipBotItems(int client)
         TF2Attrib_SetByName(weapon, "killstreak tier", 3.0);
         TF2Attrib_SetByName(weapon, "killstreak effect", float(specKs));
         TF2Attrib_SetByName(weapon, "killstreak idleeffect", float(profKs));
+
+        float flScale = PVE_GetBotScalingMultiplier();
+        if (flScale > 1.0)
+        {
+            TF2Attrib_SetByDefIndex(weapon, 2, flScale); // 2: "damage bonus" (무기 피해량 보너스 배율)
+        }
     }
 }
 
@@ -789,6 +838,38 @@ void PVE_ApplyPlayerAttributes(int client)
         TFAttribute attrib;
         g_hPlayerAttributes.GetArray(i, attrib);
         TF2Attrib_SetByName(client, attrib.m_szName, attrib.m_flValue);
+    }
+
+    float flBaseHealthBonus = 0.0;
+    for (int i = 0; i < g_hPlayerAttributes.Length; i++)
+    {
+        TFAttribute attrib;
+        g_hPlayerAttributes.GetArray(i, attrib);
+        if (StrEqual(attrib.m_szName, "max health additive bonus", false))
+        {
+            flBaseHealthBonus = attrib.m_flValue;
+            break;
+        }
+    }
+
+    float flScale = PVE_GetBotScalingMultiplier();
+    float flTotalHealth = (125.0 + flBaseHealthBonus) * flScale;
+
+    if (flScale > 1.0)
+    {
+        TF2Attrib_SetByDefIndex(client, 26, flTotalHealth - 125.0); // 26: "max health additive bonus" (최대 체력 추가 보너스)
+        TF2Attrib_SetByDefIndex(client, 286, flScale);              // 286: "engy building health bonus" (엔지니어 구조물 체력 보너스 배율)
+        TF2Attrib_SetByDefIndex(client, 287, flScale);              // 287: "engy sentry damage bonus" (센트리건 피해량 보너스 배율)
+    }
+    else
+    {
+        TF2Attrib_RemoveByDefIndex(client, 286);                    // 286: "engy building health bonus" 제거
+        TF2Attrib_RemoveByDefIndex(client, 287);                    // 287: "engy sentry damage bonus" 제거
+    }
+
+    if (IsPlayerAlive(client))
+    {
+        SetEntityHealth(client, RoundToNearest(flTotalHealth));
     }
 }
 
@@ -1093,6 +1174,13 @@ public Action post_inventory_application(Event event, const char[] name, bool do
     {
         PVE_EquipBotItems(client);
         PVE_ApplyPlayerAttributes(client);
+
+        float flRemainingUber = g_flBotUberEndTime - GetGameTime();
+        if (flRemainingUber > 0.0 && IsPlayerAlive(client))
+        {
+            TF2_AddCondition(client, TFCond_Ubercharged, flRemainingUber);  // 남은 시간만큼 무적 우버
+            TF2_AddCondition(client, TFCond_Kritzkrieged, flRemainingUber); // 남은 시간만큼 크리 우버
+        }
     }
 
     return Plugin_Continue;
@@ -1148,6 +1236,8 @@ public Action teamplay_setup_finished(Event event, const char[] name, bool dontB
 {
     g_bIsRoundActive   = true;
     g_flRoundStartTime = GetGameTime();
+    g_iCapturedPoints  = 0;
+    g_flBotUberEndTime = 0.0;
 
     if (g_bIsMultiStageMap)
     {
@@ -1234,13 +1324,28 @@ public Action teamplay_point_captured(Event event, const char[] name, bool dontB
         return Plugin_Handled;
     }
 
+    int cp = event.GetInt("cp");
+    int team = event.GetInt("team");
+
+    if (team == view_as<int>(TFTeam_Humans))
+    {
+        g_iCapturedPoints++;
+        g_flBotUberEndTime = GetGameTime() + 60.0;
+        for (int i = 1; i <= MaxClients; i++)
+        {
+            if (IsClientInGame(i) && IsFakeClient(i) && IsPlayerAlive(i))
+            {
+                TF2_AddCondition(i, TFCond_Ubercharged, 60.0);  // 무적 우버 60초
+                TF2_AddCondition(i, TFCond_Kritzkrieged, 60.0); // 크리 우버 60초
+            }
+        }
+        PVE_CheckBotScalingChange(true);
+    }
+
     if (!tf_gamemode_cp.BoolValue)
     {
         return Plugin_Continue;
     }
-
-    int cp = event.GetInt("cp");
-    int team = event.GetInt("team");
     
     // Dynamically clear the requirement for the next point to forcefully unlock it
     if (team == 3 && !g_bIsSteel && !IsAttackDefenseMode()) // BLU
@@ -1346,9 +1451,14 @@ public Action teamplay_round_start(Event event, const char[] name, bool dontBroa
     if (FullReset > 0) {
         g_bIsMultiStageMap = false;
         g_flCurrentMapTime = 0.0;
+    g_iLastBonusPercent = 0;
+    g_iCapturedPoints = 0;
+    g_flBotUberEndTime = 0.0;
     }
     
     g_flRoundStartTime = GetGameTime();
+    g_iCapturedPoints  = 0;
+    g_flBotUberEndTime = 0.0;
 
     g_bIsRoundEnd    = false;
     g_bIsRoundActive = false;
@@ -1471,8 +1581,76 @@ void PVE_RefreshDoorTriggers()
     CreateTimer(0.1, Timer_EnableTriggers);
 }
 
+void PVE_CheckBotScalingChange(bool bPointCaptured = false)
+{
+    int humanCount = PVE_GetHumanCount();
+    int totalBonusPercent = PVE_GetTotalScalingBonusPercent();
+
+    if (totalBonusPercent == g_iLastBonusPercent)
+    {
+        return;
+    }
+
+    g_iLastBonusPercent = totalBonusPercent;
+    float flScale = PVE_GetBotScalingMultiplier();
+
+    // Update all currently active bots immediately
+    for (int i = 1; i <= MaxClients; i++)
+    {
+        if (IsClientInGame(i) && IsFakeClient(i))
+        {
+            PVE_ApplyPlayerAttributes(i);
+            for (int slot = TFWeaponSlot_Primary; slot <= TFWeaponSlot_Melee; slot++)
+            {
+                int weapon = GetPlayerWeaponSlot(i, slot);
+                if (!IsValidEntity(weapon))
+                    continue;
+
+                if (flScale > 1.0)
+                {
+                    TF2Attrib_SetByDefIndex(weapon, 2, flScale); // 2: "damage bonus" (무기 피해량 보너스 배율)
+                }
+                else
+                {
+                    TF2Attrib_RemoveByDefIndex(weapon, 2);       // 2: "damage bonus" 제거
+                }
+            }
+        }
+    }
+
+    // Show HUD notification at top-left to all human players
+    if (g_hScalingHudSync != null)
+    {
+        for (int i = 1; i <= MaxClients; i++)
+        {
+            if (IsClientInGame(i) && !IsFakeClient(i))
+            {
+                if (totalBonusPercent > 0)
+                {
+                    SetHudTextParams(0.02, 0.05, 6.0, 255, 200, 50, 255, 0, 0.0, 0.1, 0.5);
+                    if (bPointCaptured)
+                    {
+                        ShowSyncHudText(i, g_hScalingHudSync, "[능력치 변화 (인원: %d명 / 점령: %d회)]\n봇 & 센트리건 체력/피해량: +%d%%\n봇 무적 + 크리 우버 60초 발동!", humanCount, g_iCapturedPoints, totalBonusPercent);
+                    }
+                    else
+                    {
+                        ShowSyncHudText(i, g_hScalingHudSync, "[능력치 변화 (인원: %d명 / 점령: %d회)]\n봇 & 센트리건 체력/피해량: +%d%%", humanCount, g_iCapturedPoints, totalBonusPercent);
+                    }
+                }
+                else
+                {
+                    SetHudTextParams(0.02, 0.05, 6.0, 100, 255, 100, 255, 0, 0.0, 0.1, 0.5);
+                    ShowSyncHudText(i, g_hScalingHudSync, "[능력치 변화 (인원: %d명 / 점령: %d회)]\n봇 & 센트리건 체력/피해량: 기본값 (보너스 없음)", humanCount, g_iCapturedPoints);
+                }
+            }
+        }
+    }
+}
+
 public Action Timer_UpdateRoundTime(Handle timer, any ent)
 {
+    PVE_CheckBotScalingChange();
+
     if (g_eTeamRoundTimer <= 0)
     {
         return Plugin_Handled;
