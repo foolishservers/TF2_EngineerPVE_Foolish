@@ -113,6 +113,8 @@ Handle        g_hScalingHudSync       = null;
 int           g_iLastBonusPercent     = 0;
 int           g_iCapturedPoints       = 0;
 float         g_flBotUberEndTime      = 0.0;
+float         g_flCurrentScale        = 1.0;
+float         g_flBaseHealthBonus     = 0.0;
 
 // List of entities that need to be cleaned up on arrival to save
 // on edict count.
@@ -235,6 +237,7 @@ public void OnMapStart()
     g_iLastBonusPercent = 0;
     g_iCapturedPoints = 0;
     g_flBotUberEndTime = 0.0;
+    g_flCurrentScale = 1.0;
 }
 
 public Action Timer_HydroUpdateObjectiveResource(Handle timer)
@@ -521,6 +524,7 @@ void Config_LoadAttributesFromKV(KeyValues kv)
 {
     delete g_hPlayerAttributes;
     g_hPlayerAttributes = new ArrayList(sizeof(TFAttribute));
+    g_flBaseHealthBonus = 0.0;
 
     if (kv.GotoFirstSubKey(false))
     {
@@ -530,6 +534,10 @@ void Config_LoadAttributesFromKV(KeyValues kv)
             TFAttribute attrib;
             kv.GetSectionName(attrib.m_szName, sizeof(attrib.m_szName));
             attrib.m_flValue = kv.GetFloat(NULL_STRING);
+            if (StrEqual(attrib.m_szName, "max health additive bonus", false))
+            {
+                g_flBaseHealthBonus = attrib.m_flValue;
+            }
             g_hPlayerAttributes.PushArray(attrib);
         }
         while (kv.GotoNextKey(false));
@@ -698,11 +706,6 @@ int PVE_GetTotalScalingBonusPercent()
     return (extraPlayers * 10) + captureBonusPercent;
 }
 
-float PVE_GetBotScalingMultiplier()
-{
-    return 1.0 + (float(PVE_GetTotalScalingBonusPercent()) * 0.01);
-}
-
 void PVE_RenameBotClient(int client)
 {
     // Figure out the name of the bot.
@@ -742,7 +745,7 @@ void PVE_EquipBotItems(int client)
     for (int i = TFWeaponSlot_Primary; i <= TFWeaponSlot_Melee; i++)
     {
         int weapon = GetPlayerWeaponSlot(client, i);
-        if (!IsValidEntity(weapon))
+        if (weapon <= MaxClients || !IsValidEntity(weapon))
             continue;
 
         int specKs = GetRandomInt(2002, 2008);
@@ -752,10 +755,9 @@ void PVE_EquipBotItems(int client)
         TF2Attrib_SetByName(weapon, "killstreak effect", float(specKs));
         TF2Attrib_SetByName(weapon, "killstreak idleeffect", float(profKs));
 
-        float flScale = PVE_GetBotScalingMultiplier();
-        if (flScale > 1.0)
+        if (g_flCurrentScale > 1.0)
         {
-            TF2Attrib_SetByDefIndex(weapon, 2, flScale); // 2: "damage bonus" (무기 피해량 보너스 배율)
+            TF2Attrib_SetByDefIndex(weapon, 2, g_flCurrentScale); // 2: "damage bonus" (무기 피해량 보너스 배율)
         }
     }
 }
@@ -830,6 +832,29 @@ void PVE_ApplyBotItemAttributesOnEntity(int entity, BotItem item)
     }
 }
 
+void PVE_ApplyBotScalingOnly(int client)
+{
+    float flScale = g_flCurrentScale;
+    float flTotalHealth = (125.0 + g_flBaseHealthBonus) * flScale;
+
+    TF2Attrib_SetByDefIndex(client, 26, flTotalHealth - 125.0); // 26: "max health additive bonus" (최대 체력 추가 보너스)
+    if (flScale > 1.0)
+    {
+        TF2Attrib_SetByDefIndex(client, 286, flScale);          // 286: "engy building health bonus" (엔지니어 구조물 체력 보너스 배율)
+        TF2Attrib_SetByDefIndex(client, 287, flScale);          // 287: "engy sentry damage bonus" (센트리건 피해량 보너스 배율)
+    }
+    else
+    {
+        TF2Attrib_RemoveByDefIndex(client, 286);                // 286: "engy building health bonus" 제거
+        TF2Attrib_RemoveByDefIndex(client, 287);                // 287: "engy sentry damage bonus" 제거
+    }
+
+    if (IsPlayerAlive(client))
+    {
+        SetEntityHealth(client, RoundToNearest(flTotalHealth));
+    }
+}
+
 // Apply player attributes from config on a given client
 void PVE_ApplyPlayerAttributes(int client)
 {
@@ -837,40 +862,12 @@ void PVE_ApplyPlayerAttributes(int client)
     {
         TFAttribute attrib;
         g_hPlayerAttributes.GetArray(i, attrib);
+        if (StrEqual(attrib.m_szName, "max health additive bonus", false))
+            continue;
         TF2Attrib_SetByName(client, attrib.m_szName, attrib.m_flValue);
     }
 
-    float flBaseHealthBonus = 0.0;
-    for (int i = 0; i < g_hPlayerAttributes.Length; i++)
-    {
-        TFAttribute attrib;
-        g_hPlayerAttributes.GetArray(i, attrib);
-        if (StrEqual(attrib.m_szName, "max health additive bonus", false))
-        {
-            flBaseHealthBonus = attrib.m_flValue;
-            break;
-        }
-    }
-
-    float flScale = PVE_GetBotScalingMultiplier();
-    float flTotalHealth = (125.0 + flBaseHealthBonus) * flScale;
-
-    if (flScale > 1.0)
-    {
-        TF2Attrib_SetByDefIndex(client, 26, flTotalHealth - 125.0); // 26: "max health additive bonus" (최대 체력 추가 보너스)
-        TF2Attrib_SetByDefIndex(client, 286, flScale);              // 286: "engy building health bonus" (엔지니어 구조물 체력 보너스 배율)
-        TF2Attrib_SetByDefIndex(client, 287, flScale);              // 287: "engy sentry damage bonus" (센트리건 피해량 보너스 배율)
-    }
-    else
-    {
-        TF2Attrib_RemoveByDefIndex(client, 286);                    // 286: "engy building health bonus" 제거
-        TF2Attrib_RemoveByDefIndex(client, 287);                    // 287: "engy sentry damage bonus" 제거
-    }
-
-    if (IsPlayerAlive(client))
-    {
-        SetEntityHealth(client, RoundToNearest(flTotalHealth));
-    }
+    PVE_ApplyBotScalingOnly(client);
 }
 
 // Create and give wearable to client with a given item definition
@@ -1169,21 +1166,38 @@ Action cBecomeEngiBot(int client, int args)
 public Action post_inventory_application(Event event, const char[] name, bool dontBroadcast)
 {
     int client = GetClientOfUserId(event.GetInt("userid"));
+    if (client <= 0 || !IsClientInGame(client))
+    {
+        return Plugin_Continue;
+    }
 
     if (IsFakeClient(client))
     {
         PVE_EquipBotItems(client);
         PVE_ApplyPlayerAttributes(client);
 
+        if (g_flBotUberEndTime > GetGameTime())
+        {
+            CreateTimer(0.1, Timer_ApplyBotSpawnUber, GetClientUserId(client));
+        }
+    }
+
+    return Plugin_Continue;
+}
+
+public Action Timer_ApplyBotSpawnUber(Handle timer, any userid)
+{
+    int client = GetClientOfUserId(userid);
+    if (client > 0 && IsClientInGame(client) && IsFakeClient(client) && IsPlayerAlive(client))
+    {
         float flRemainingUber = g_flBotUberEndTime - GetGameTime();
-        if (flRemainingUber > 0.0 && IsPlayerAlive(client))
+        if (flRemainingUber > 0.0)
         {
             TF2_AddCondition(client, TFCond_Ubercharged, flRemainingUber);  // 남은 시간만큼 무적 우버
             TF2_AddCondition(client, TFCond_Kritzkrieged, flRemainingUber); // 남은 시간만큼 크리 우버
         }
     }
-
-    return Plugin_Continue;
+    return Plugin_Handled;
 }
 
 public Action player_spawn(Event event, const char[] name, bool dontBroadcast)
@@ -1331,15 +1345,7 @@ public Action teamplay_point_captured(Event event, const char[] name, bool dontB
     {
         g_iCapturedPoints++;
         g_flBotUberEndTime = GetGameTime() + 60.0;
-        for (int i = 1; i <= MaxClients; i++)
-        {
-            if (IsClientInGame(i) && IsFakeClient(i) && IsPlayerAlive(i))
-            {
-                TF2_AddCondition(i, TFCond_Ubercharged, 60.0);  // 무적 우버 60초
-                TF2_AddCondition(i, TFCond_Kritzkrieged, 60.0); // 크리 우버 60초
-            }
-        }
-        PVE_CheckBotScalingChange(true);
+        CreateTimer(0.2, Timer_OnPointCapturedBuffBots);
     }
 
     if (!tf_gamemode_cp.BoolValue)
@@ -1454,6 +1460,7 @@ public Action teamplay_round_start(Event event, const char[] name, bool dontBroa
     g_iLastBonusPercent = 0;
     g_iCapturedPoints = 0;
     g_flBotUberEndTime = 0.0;
+    g_flCurrentScale = 1.0;
     }
     
     g_flRoundStartTime = GetGameTime();
@@ -1581,6 +1588,24 @@ void PVE_RefreshDoorTriggers()
     CreateTimer(0.1, Timer_EnableTriggers);
 }
 
+public Action Timer_OnPointCapturedBuffBots(Handle timer)
+{
+    float flRemainingUber = g_flBotUberEndTime - GetGameTime();
+    if (flRemainingUber > 0.0)
+    {
+        for (int i = 1; i <= MaxClients; i++)
+        {
+            if (IsClientInGame(i) && IsFakeClient(i) && IsPlayerAlive(i))
+            {
+                TF2_AddCondition(i, TFCond_Ubercharged, flRemainingUber);  // 무적 우버
+                TF2_AddCondition(i, TFCond_Kritzkrieged, flRemainingUber); // 크리 우버
+            }
+        }
+    }
+    PVE_CheckBotScalingChange(true);
+    return Plugin_Handled;
+}
+
 void PVE_CheckBotScalingChange(bool bPointCaptured = false)
 {
     int humanCount = PVE_GetHumanCount();
@@ -1592,18 +1617,19 @@ void PVE_CheckBotScalingChange(bool bPointCaptured = false)
     }
 
     g_iLastBonusPercent = totalBonusPercent;
-    float flScale = PVE_GetBotScalingMultiplier();
+    g_flCurrentScale = 1.0 + (float(totalBonusPercent) * 0.01);
+    float flScale = g_flCurrentScale;
 
-    // Update all currently active bots immediately
+    // Update all currently alive bots immediately using lightweight DefIndex calls only
     for (int i = 1; i <= MaxClients; i++)
     {
-        if (IsClientInGame(i) && IsFakeClient(i))
+        if (IsClientInGame(i) && IsFakeClient(i) && IsPlayerAlive(i))
         {
-            PVE_ApplyPlayerAttributes(i);
+            PVE_ApplyBotScalingOnly(i);
             for (int slot = TFWeaponSlot_Primary; slot <= TFWeaponSlot_Melee; slot++)
             {
                 int weapon = GetPlayerWeaponSlot(i, slot);
-                if (!IsValidEntity(weapon))
+                if (weapon <= MaxClients || !IsValidEntity(weapon))
                     continue;
 
                 if (flScale > 1.0)
