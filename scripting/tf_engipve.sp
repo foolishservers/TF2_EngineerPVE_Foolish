@@ -211,6 +211,13 @@ public OnPluginStart()
     AddCommandListener(cAutoTeam, "autoteam");
 
     AutoExecConfig(true, "tf_engipve");
+
+    int capArea = -1;
+    while ((capArea = FindEntityByClassname(capArea, "trigger_capture_area")) != -1)
+    {
+        SDKHook(capArea, SDKHook_Touch, OnCaptureAreaTouch);
+        SDKHook(capArea, SDKHook_StartTouch, OnCaptureAreaTouch);
+    }
 }
 
 public void OnMapStart()
@@ -1344,7 +1351,7 @@ public Action teamplay_point_captured(Event event, const char[] name, bool dontB
     if (team == view_as<int>(TFTeam_Humans))
     {
         g_iCapturedPoints++;
-        g_flBotUberEndTime = GetGameTime() + 60.0;
+        g_flBotUberEndTime = GetGameTime() + 45.0;
         CreateTimer(0.2, Timer_OnPointCapturedBuffBots);
     }
 
@@ -1656,7 +1663,7 @@ void PVE_CheckBotScalingChange(bool bPointCaptured = false)
                     SetHudTextParams(0.02, 0.05, 6.0, 255, 200, 50, 255, 0, 0.0, 0.1, 0.5);
                     if (bPointCaptured)
                     {
-                        ShowSyncHudText(i, g_hScalingHudSync, "[능력치 변화 (인원: %d명 / 점령: %d회)]\n봇 & 센트리건 체력/피해량: +%d%%\n봇 무적 + 크리 우버 60초 발동!", humanCount, g_iCapturedPoints, totalBonusPercent);
+                        ShowSyncHudText(i, g_hScalingHudSync, "[능력치 변화 (인원: %d명 / 점령: %d회)]\n봇 & 센트리건 체력/피해량: +%d%%\n봇 무적 + 크리 우버 45초 발동!", humanCount, g_iCapturedPoints, totalBonusPercent);
                     }
                     else
                     {
@@ -1737,12 +1744,7 @@ public Action Timer_UpdateRoundTime(Handle timer, any ent)
 public Action OnCaptureAreaTouch(int entity, int other)
 {
     // Ignore non-players
-    if (other <= 0 || other > MaxClients)
-    {
-        return Plugin_Continue;
-    }
-
-    if (!tf_gamemode_cp.BoolValue)
+    if (other <= 0 || other > MaxClients || !IsClientInGame(other))
     {
         return Plugin_Continue;
     }
@@ -1757,6 +1759,17 @@ public Action OnCaptureAreaTouch(int entity, int other)
     {
         // Block RED team entirely from even registering as standing on the capture area
         return Plugin_Handled;
+    }
+
+    if (GetClientTeam(other) == 3) // BLU team
+    {
+        if (TF2_IsPlayerInCondition(other, TFCond_Ubercharged) ||
+            TF2_IsPlayerInCondition(other, TFCond_UberchargedCanteen) ||
+            TF2_IsPlayerInCondition(other, TFCond_UberchargedHidden) ||
+            TF2_IsPlayerInCondition(other, TFCond_UberchargedOnTakeDamage))
+        {
+            return Plugin_Handled;
+        }
     }
 
     return Plugin_Continue;
