@@ -761,11 +761,6 @@ void PVE_EquipBotItems(int client)
         TF2Attrib_SetByName(weapon, "killstreak tier", 3.0);
         TF2Attrib_SetByName(weapon, "killstreak effect", float(specKs));
         TF2Attrib_SetByName(weapon, "killstreak idleeffect", float(profKs));
-
-        if (g_flCurrentScale > 1.0)
-        {
-            TF2Attrib_SetByDefIndex(weapon, 2, g_flCurrentScale); // 2: "damage bonus" (무기 피해량 보너스 배율)
-        }
     }
 }
 
@@ -1625,7 +1620,6 @@ void PVE_CheckBotScalingChange(bool bPointCaptured = false)
 
     g_iLastBonusPercent = totalBonusPercent;
     g_flCurrentScale = 1.0 + (float(totalBonusPercent) * 0.01);
-    float flScale = g_flCurrentScale;
 
     // Update all currently alive bots immediately using lightweight DefIndex calls only
     for (int i = 1; i <= MaxClients; i++)
@@ -1639,14 +1633,7 @@ void PVE_CheckBotScalingChange(bool bPointCaptured = false)
                 if (weapon <= MaxClients || !IsValidEntity(weapon))
                     continue;
 
-                if (flScale > 1.0)
-                {
-                    TF2Attrib_SetByDefIndex(weapon, 2, flScale); // 2: "damage bonus" (무기 피해량 보너스 배율)
-                }
-                else
-                {
-                    TF2Attrib_RemoveByDefIndex(weapon, 2);       // 2: "damage bonus" 제거
-                }
+                TF2Attrib_RemoveByDefIndex(weapon, 2);       // 2: "damage bonus" 제거 (봇 무기 피해량 추가 증가 비활성화)
             }
         }
     }
@@ -1663,17 +1650,17 @@ void PVE_CheckBotScalingChange(bool bPointCaptured = false)
                     SetHudTextParams(0.02, 0.05, 6.0, 255, 200, 50, 255, 0, 0.0, 0.1, 0.5);
                     if (bPointCaptured)
                     {
-                        ShowSyncHudText(i, g_hScalingHudSync, "[능력치 변화 (인원: %d명 / 점령: %d회)]\n봇 & 센트리건 체력/피해량: +%d%%\n봇 무적 + 크리 우버 45초 발동!", humanCount, g_iCapturedPoints, totalBonusPercent);
+                        ShowSyncHudText(i, g_hScalingHudSync, "[능력치 변화 (인원: %d명 / 점령: %d회)]\n봇 & 센트리건 체력, 센트리 피해량: +%d%%\n봇 무적 + 크리 우버 45초 발동!", humanCount, g_iCapturedPoints, totalBonusPercent);
                     }
                     else
                     {
-                        ShowSyncHudText(i, g_hScalingHudSync, "[능력치 변화 (인원: %d명 / 점령: %d회)]\n봇 & 센트리건 체력/피해량: +%d%%", humanCount, g_iCapturedPoints, totalBonusPercent);
+                        ShowSyncHudText(i, g_hScalingHudSync, "[능력치 변화 (인원: %d명 / 점령: %d회)]\n봇 & 센트리건 체력, 센트리 피해량: +%d%%", humanCount, g_iCapturedPoints, totalBonusPercent);
                     }
                 }
                 else
                 {
                     SetHudTextParams(0.02, 0.05, 6.0, 100, 255, 100, 255, 0, 0.0, 0.1, 0.5);
-                    ShowSyncHudText(i, g_hScalingHudSync, "[능력치 변화 (인원: %d명 / 점령: %d회)]\n봇 & 센트리건 체력/피해량: 기본값 (보너스 없음)", humanCount, g_iCapturedPoints);
+                    ShowSyncHudText(i, g_hScalingHudSync, "[능력치 변화 (인원: %d명 / 점령: %d회)]\n봇 & 센트리건 체력, 센트리 피해량: 기본값 (보너스 없음)", humanCount, g_iCapturedPoints);
                 }
             }
         }
