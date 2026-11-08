@@ -840,15 +840,16 @@ void PVE_ApplyBotScalingOnly(int client)
     float flTotalHealth = (125.0 + g_flBaseHealthBonus) * flScale;
 
     TF2Attrib_SetByDefIndex(client, 26, flTotalHealth - 125.0); // 26: "max health additive bonus" (최대 체력 추가 보너스)
+    TF2Attrib_SetByDefIndex(client, 57, flTotalHealth / 3.0);   // 57: "health regen" (최대 체력의 1/3 초당 재생)
+    TF2Attrib_RemoveByDefIndex(client, 287);                    // 287: "engy sentry damage bonus" 제거 (센트리 피해량 보너스 비활성화)
+
     if (flScale > 1.0)
     {
         TF2Attrib_SetByDefIndex(client, 286, flScale);          // 286: "engy building health bonus" (엔지니어 구조물 체력 보너스 배율)
-        TF2Attrib_SetByDefIndex(client, 287, flScale);          // 287: "engy sentry damage bonus" (센트리건 피해량 보너스 배율)
     }
     else
     {
         TF2Attrib_RemoveByDefIndex(client, 286);                // 286: "engy building health bonus" 제거
-        TF2Attrib_RemoveByDefIndex(client, 287);                // 287: "engy sentry damage bonus" 제거
     }
 
     if (IsPlayerAlive(client))
@@ -1650,17 +1651,17 @@ void PVE_CheckBotScalingChange(bool bPointCaptured = false)
                     SetHudTextParams(0.02, 0.05, 6.0, 255, 200, 50, 255, 0, 0.0, 0.1, 0.5);
                     if (bPointCaptured)
                     {
-                        ShowSyncHudText(i, g_hScalingHudSync, "[능력치 변화 (인원: %d명 / 점령: %d회)]\n봇 & 센트리건 체력, 센트리 피해량: +%d%%\n봇 무적 + 크리 우버 45초 발동!", humanCount, g_iCapturedPoints, totalBonusPercent);
+                        ShowSyncHudText(i, g_hScalingHudSync, "[능력치 변화 (인원: %d명 / 점령: %d회)]\n봇 & 센트리건 체력: +%d%%\n봇 무적 + 크리 우버 45초 발동!", humanCount, g_iCapturedPoints, totalBonusPercent);
                     }
                     else
                     {
-                        ShowSyncHudText(i, g_hScalingHudSync, "[능력치 변화 (인원: %d명 / 점령: %d회)]\n봇 & 센트리건 체력, 센트리 피해량: +%d%%", humanCount, g_iCapturedPoints, totalBonusPercent);
+                        ShowSyncHudText(i, g_hScalingHudSync, "[능력치 변화 (인원: %d명 / 점령: %d회)]\n봇 & 센트리건 체력: +%d%%", humanCount, g_iCapturedPoints, totalBonusPercent);
                     }
                 }
                 else
                 {
                     SetHudTextParams(0.02, 0.05, 6.0, 100, 255, 100, 255, 0, 0.0, 0.1, 0.5);
-                    ShowSyncHudText(i, g_hScalingHudSync, "[능력치 변화 (인원: %d명 / 점령: %d회)]\n봇 & 센트리건 체력, 센트리 피해량: 기본값 (보너스 없음)", humanCount, g_iCapturedPoints);
+                    ShowSyncHudText(i, g_hScalingHudSync, "[능력치 변화 (인원: %d명 / 점령: %d회)]\n봇 & 센트리건 체력: 기본값 (보너스 없음)", humanCount, g_iCapturedPoints);
                 }
             }
         }
@@ -1750,6 +1751,12 @@ public Action OnCaptureAreaTouch(int entity, int other)
 
     if (GetClientTeam(other) == 3) // BLU team
     {
+        // Block capture while bots are in their post-capture uber period
+        if (g_flBotUberEndTime > GetGameTime())
+        {
+            return Plugin_Handled;
+        }
+
         if (TF2_IsPlayerInCondition(other, TFCond_Ubercharged) ||
             TF2_IsPlayerInCondition(other, TFCond_UberchargedCanteen) ||
             TF2_IsPlayerInCondition(other, TFCond_UberchargedHidden) ||
