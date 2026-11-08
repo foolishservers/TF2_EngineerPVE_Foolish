@@ -113,6 +113,8 @@ Handle        g_hScalingHudSync       = null;
 int           g_iLastBonusPercent     = 0;
 int           g_iCapturedPoints       = 0;
 float         g_flBotUberEndTime      = 0.0;
+Handle        g_hTimerCaptureLock     = null;
+int           g_iPendingUnlockCP      = -1;
 float         g_flCurrentScale        = 1.0;
 float         g_flBaseHealthBonus     = 0.0;
 
@@ -244,6 +246,7 @@ public void OnMapStart()
     g_iLastBonusPercent = 0;
     g_iCapturedPoints = 0;
     g_flBotUberEndTime = 0.0;
+    PVE_ResetCaptureLock();
     g_flCurrentScale = 1.0;
 }
 
@@ -707,10 +710,10 @@ int PVE_GetTotalScalingBonusPercent()
     int captureBonusPercent = 0;
     for (int i = 1; i <= g_iCapturedPoints; i++)
     {
-        captureBonusPercent += 20 + (i * 10); // 1회: +30%, 2회: +40%, 3회: +50%, 4회: +60% ... 누적
+        captureBonusPercent += 10 + (i * 5); // 기존(20+10*i)에서 50% 삭감: 1회 +15%, 2회 +20%, 3회 +25%, 4회 +30% ... 누적
     }
 
-    return (extraPlayers * 10) + captureBonusPercent;
+    return (extraPlayers * 5) + captureBonusPercent; // 인원당 보너스도 10% -> 5%로 50% 삭감
 }
 
 void PVE_RenameBotClient(int client)
@@ -745,16 +748,13 @@ void PVE_EquipBotItems(int client)
         PVE_ApplyBotItemAttributesOnEntity(hat, cosmetic);
     }
 
-    PVE_GiveBotRandomSlotWeaponFromArrayList(client, TFWeaponSlot_Primary, g_hPrimaryWeapons);
-    PVE_GiveBotRandomSlotWeaponFromArrayList(client, TFWeaponSlot_Secondary, g_hSecondaryWeapons);
+    TF2_RemoveWeaponSlot(client, TFWeaponSlot_Primary);
+    TF2_RemoveWeaponSlot(client, TFWeaponSlot_Secondary);
     PVE_GiveBotRandomSlotWeaponFromArrayList(client, TFWeaponSlot_Melee, g_hMeleeWeapons);
 
-    for (int i = TFWeaponSlot_Primary; i <= TFWeaponSlot_Melee; i++)
+    int weapon = GetPlayerWeaponSlot(client, TFWeaponSlot_Melee);
+    if (weapon > MaxClients && IsValidEntity(weapon))
     {
-        int weapon = GetPlayerWeaponSlot(client, i);
-        if (weapon <= MaxClients || !IsValidEntity(weapon))
-            continue;
-
         int specKs = GetRandomInt(2002, 2008);
         int profKs = GetRandomInt(1, 7);
 
@@ -1255,6 +1255,7 @@ public Action teamplay_setup_finished(Event event, const char[] name, bool dontB
     g_flRoundStartTime = GetGameTime();
     g_iCapturedPoints  = 0;
     g_flBotUberEndTime = 0.0;
+    PVE_ResetCaptureLock();
 
     if (g_bIsMultiStageMap)
     {
@@ -1349,43 +1350,7 @@ public Action teamplay_point_captured(Event event, const char[] name, bool dontB
         g_iCapturedPoints++;
         g_flBotUberEndTime = GetGameTime() + 45.0;
         CreateTimer(0.2, Timer_OnPointCapturedBuffBots);
-    }
-
-    if (!tf_gamemode_cp.BoolValue)
-    {
-        return Plugin_Continue;
-    }
-    
-    // Dynamically clear the requirement for the next point to forcefully unlock it
-    if (team == 3 && !g_bIsSteel && !IsAttackDefenseMode()) // BLU
-    {
-        int or = FindEntityByClassname(-1, "tf_objective_resource");
-        if (or != -1)
-        {
-            for (int i = 0; i < 8; i++)
-            {
-                int prev_point = GetEntProp(or, Prop_Send, "m_iPreviousPoints", _, (3 * 8 * 3) + (i * 3));
-                if (prev_point == cp)
-                {
-                    // This point (index i) required the point we just captured. Force it to unlock!
-                    SetEntProp(or, Prop_Send, "m_iPreviousPoints", -1, _, (3 * 8 * 3) + (i * 3));
-                    SetEntProp(or, Prop_Send, "m_bTeamCanCap", 1, _, i + 3 * 8);
-                    
-                    int ent = -1;
-                    while ((ent = FindEntityByClassname(ent, "team_control_point")) != -1)
-                    {
-                        if (GetEntProp(ent, Prop_Data, "m_iPointIndex") == i)
-                        {
-                            DispatchKeyValue(ent, "team_previouspoint_3_0", "");
-                            DispatchKeyValue(ent, "team_previouspoint_3_1", "");
-                            DispatchKeyValue(ent, "team_previouspoint_3_2", "");
-                            
-                            break;
-                        }
-                    }
-                }
-            }
-        }
+        PVE_LockCapturePoints(45.0, cp);
     }
     if (g_bIsSteel)
     {
@@ -1411,6 +1376,7 @@ public Action teamplay_round_win(Event event, const char[] name, bool dontBroadc
     int FullRound = event.GetInt("full_round");
     g_bIsRoundActive = false;
     g_bIsRoundEnd    = true;
+    PVE_ResetCaptureLock();
 
     if (FullRound <= 0)
     {
@@ -1463,12 +1429,14 @@ public Action teamplay_round_start(Event event, const char[] name, bool dontBroa
     g_iLastBonusPercent = 0;
     g_iCapturedPoints = 0;
     g_flBotUberEndTime = 0.0;
+    PVE_ResetCaptureLock();
     g_flCurrentScale = 1.0;
     }
     
     g_flRoundStartTime = GetGameTime();
     g_iCapturedPoints  = 0;
     g_flBotUberEndTime = 0.0;
+    PVE_ResetCaptureLock();
 
     g_bIsRoundEnd    = false;
     g_bIsRoundActive = false;
@@ -1589,6 +1557,139 @@ void PVE_RefreshDoorTriggers()
         }
     }
     CreateTimer(0.1, Timer_EnableTriggers);
+}
+
+//-------------------------------------------------------//
+// Post-Capture Lock System
+//-------------------------------------------------------//
+void PVE_ResetCaptureLock()
+{
+    delete g_hTimerCaptureLock;
+    g_flBotUberEndTime = 0.0;
+    g_iPendingUnlockCP = -1;
+}
+
+void PVE_ApplyCaptureLock(bool bPulseReset = false)
+{
+    int ent = -1;
+    while ((ent = FindEntityByClassname(ent, "trigger_capture_area")) != -1)
+    {
+        SetVariantString("3 0");
+        AcceptEntityInput(ent, "SetTeamCanCap");
+        if (bPulseReset)
+        {
+            AcceptEntityInput(ent, "Disable");
+            AcceptEntityInput(ent, "Enable");
+        }
+    }
+
+    ent = -1;
+    while ((ent = FindEntityByClassname(ent, "team_control_point")) != -1)
+    {
+        int owner = GetEntProp(ent, Prop_Data, "m_iTeamNum");
+        if (owner != 3) // Only lock uncaptured points (not owned by BLU)
+        {
+            SetVariantInt(1);
+            AcceptEntityInput(ent, "SetLocked");
+        }
+    }
+}
+
+void PVE_LockCapturePoints(float flDuration, int cp)
+{
+    g_iPendingUnlockCP = cp;
+    PVE_ApplyCaptureLock(true);
+
+    int ent = -1;
+    while ((ent = FindEntityByClassname(ent, "team_control_point")) != -1)
+    {
+        int owner = GetEntProp(ent, Prop_Data, "m_iTeamNum");
+        if (owner != 3)
+        {
+            SetVariantInt(RoundToFloor(flDuration));
+            AcceptEntityInput(ent, "SetUnlockTime");
+        }
+    }
+
+    delete g_hTimerCaptureLock;
+    g_hTimerCaptureLock = CreateTimer(0.5, Timer_CaptureLockTick, _, TIMER_REPEAT);
+}
+
+public Action Timer_CaptureLockTick(Handle timer)
+{
+    if (g_bIsRoundEnd || !g_bIsRoundActive)
+    {
+        g_hTimerCaptureLock = null;
+        PVE_ResetCaptureLock();
+        return Plugin_Stop;
+    }
+
+    float flRemaining = g_flBotUberEndTime - GetGameTime();
+    if (flRemaining <= 0.0)
+    {
+        g_hTimerCaptureLock = null;
+        PVE_UnlockCapturePoints();
+        return Plugin_Stop;
+    }
+
+    PVE_ApplyCaptureLock(false);
+    return Plugin_Continue;
+}
+
+void PVE_UnlockCapturePoints()
+{
+    delete g_hTimerCaptureLock;
+    g_flBotUberEndTime = 0.0;
+
+    // 1. Re-allow BLU on trigger_capture_area
+    int ent = -1;
+    while ((ent = FindEntityByClassname(ent, "trigger_capture_area")) != -1)
+    {
+        SetVariantString("3 1");
+        AcceptEntityInput(ent, "SetTeamCanCap");
+    }
+
+    // 2. Unlock control points
+    ent = -1;
+    while ((ent = FindEntityByClassname(ent, "team_control_point")) != -1)
+    {
+        SetVariantInt(0);
+        AcceptEntityInput(ent, "SetLocked");
+    }
+
+    // 3. Dynamically unlock the next point if standard CP mode
+    if (tf_gamemode_cp.BoolValue && !g_bIsSteel && !IsAttackDefenseMode() && g_iPendingUnlockCP != -1)
+    {
+        int or = FindEntityByClassname(-1, "tf_objective_resource");
+        if (or != -1)
+        {
+            for (int i = 0; i < 8; i++)
+            {
+                int prev_point = GetEntProp(or, Prop_Send, "m_iPreviousPoints", _, (3 * 8 * 3) + (i * 3));
+                if (prev_point == g_iPendingUnlockCP)
+                {
+                    // This point (index i) required the point we just captured. Force it to unlock!
+                    SetEntProp(or, Prop_Send, "m_iPreviousPoints", -1, _, (3 * 8 * 3) + (i * 3));
+                    SetEntProp(or, Prop_Send, "m_bTeamCanCap", 1, _, i + 3 * 8);
+
+                    int cpEnt = -1;
+                    while ((cpEnt = FindEntityByClassname(cpEnt, "team_control_point")) != -1)
+                    {
+                        if (GetEntProp(cpEnt, Prop_Data, "m_iPointIndex") == i)
+                        {
+                            DispatchKeyValue(cpEnt, "team_previouspoint_3_0", "");
+                            DispatchKeyValue(cpEnt, "team_previouspoint_3_1", "");
+                            DispatchKeyValue(cpEnt, "team_previouspoint_3_2", "");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    g_iPendingUnlockCP = -1;
+    PrintToChatAll("\x03[PVE]\x01 거점 잠금이 해제되었습니다! 다음 거점을 점령하세요!");
 }
 
 public Action Timer_OnPointCapturedBuffBots(Handle timer)
@@ -1754,6 +1855,10 @@ public Action OnCaptureAreaTouch(int entity, int other)
         // Block capture while bots are in their post-capture uber period
         if (g_flBotUberEndTime > GetGameTime())
         {
+            SetVariantString("3 0");
+            AcceptEntityInput(entity, "SetTeamCanCap");
+            int remaining = RoundToCeil(g_flBotUberEndTime - GetGameTime());
+            PrintCenterText(other, "거점이 잠겨있습니다! (남은 시간: %d초)", remaining);
             return Plugin_Handled;
         }
 
